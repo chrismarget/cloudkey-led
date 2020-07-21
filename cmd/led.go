@@ -7,37 +7,74 @@ import (
 )
 
 func main() {
-	//on := cloudkeyled.LedSetting{Percent: 75}
-	//off := cloudkeyled.LedSetting{Percent: 25}
-
 	whiteDir := "/sys/devices/platform/leds-mt65xx/leds/white"
-	//blueDir := "/sys/devices/platform/leds-mt65xx/leds/blue"
-
-	whiteLed, err := cloudkeyled.NewCloudKeyLed(whiteDir)
+	white, err := cloudkeyled.New(whiteDir)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	//blueLed, err := cloudkeyled.NewCloudKeyLed(blueDir)
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-
-	//whiteLed<-cloudkeyled.LedSetting{OnOff: []int{50,50}}
-	//whiteLed<-cloudkeyled.LedSetting{OnOff: []int{25,75}}
-	//for i := 0; i <= 100; i += 3 {
-	//	on := i
-	//	off := 100 - i
-	//	log.Println(on, off)
-	//	whiteLed <- cloudkeyled.LedSetting{OnOff: []int{on, off}}
-	//	time.Sleep(10 * time.Millisecond)
-	//}
-
-	whiteLed<-cloudkeyled.LedSetting{Pattern: []int{2,4,6}}
-	//time.Sleep(2*time.Second)
-	//whiteLed<-cloudkeyled.LedSetting{Count: 4}
-	//whiteLed<-off
-	for {
-		time.Sleep(1000 * time.Millisecond)
+	for i := 0; i <= 100; i++ {
+		white <- cloudkeyled.Command{Percent: i}
+		time.Sleep(20*time.Millisecond)
 	}
+	for i := 99; i >= 0; i-- {
+		white <- cloudkeyled.Command{Percent: i}
+		time.Sleep(10*time.Millisecond)
+	}
+	white <- cloudkeyled.Command{Percent: 20}
+	time.Sleep(1000*time.Millisecond)
+	white <- cloudkeyled.Command{Percent: 40}
+	time.Sleep(1000*time.Millisecond)
+	white <- cloudkeyled.Command{Percent: 60}
+	time.Sleep(1000*time.Millisecond)
+	white <- cloudkeyled.Command{Percent: 80}
+	time.Sleep(1000*time.Millisecond)
+	white <- cloudkeyled.Command{Percent: 100}
+	time.Sleep(1000*time.Millisecond)
+
+	log.Println("on")
+	white <- cloudkeyled.Command{On: true}
+	time.Sleep(time.Second)
+	log.Println("off")
+	white <- cloudkeyled.Command{Off: true}
+	time.Sleep(time.Second)
+	log.Println("on")
+	white <- cloudkeyled.Command{On: true}
+	time.Sleep(time.Second)
+	log.Println("off")
+	white <- cloudkeyled.Command{Off: true}
+	time.Sleep(time.Second)
+	log.Println("500 1500")
+	white <- cloudkeyled.Command{OnOffDelay: []int{500,1500}}
+	time.Sleep(8*time.Second)
+	log.Println("1500 500")
+	white <- cloudkeyled.Command{OnOffDelay: []int{1500,500}}
+	time.Sleep(8*time.Second)
+	log.Println("ramp up")
+	for i := 0; i <=100; i++ {
+		white <- cloudkeyled.Command{Percent: i}
+		time.Sleep(5*time.Millisecond)
+	}
+	log.Println("ramp down")
+	for i := 99; i >=0; i-- {
+		white <- cloudkeyled.Command{Percent: i}
+		time.Sleep(5*time.Millisecond)
+	}
+	//log.Println("five times")
+	//white <- cloudkeyled.Command{Count: 5}
+	log.Println("three times")
+	white <- cloudkeyled.Command{Count: 3}
+	log.Println("two times repeating")
+	white <- cloudkeyled.Command{Count: 2, Repeat: true}
+	time.Sleep(5 * time.Second)
+	log.Println("3,2,1")
+	white <- cloudkeyled.Command{Pattern: []int{3,2,1}}
+	time.Sleep(15*time.Second)
+	log.Println("1,2,3 ...")
+	white <- cloudkeyled.Command{Pattern: []int{1,2,3}, Repeat: true}
+	time.Sleep(15*time.Second)
+	log.Println("calling quit")
+	white <- cloudkeyled.Command{Quit: true}
+
+	time.Sleep(5*time.Second)
+	log.Println("main exit")
 }

@@ -7,142 +7,179 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	triggerFile  = "trigger"
 	onDelayFile  = "delay_on"
 	offDelayFile = "delay_off"
+
+	brightnessFile = "brightness"
+	triggerFile    = "trigger"
+	maxLevelFile   = "max_brightness"
+
+	triggerNone  = "none"
+	triggerTimer = "timer"
 )
 
-type LedSetting struct {
-	Quit    bool
-	Percent int
-	OnOff   []int
-	Pattern []int
-	Count   int
+type Command struct {
+	Quit       bool
+	Percent    int
+	On         bool
+	Off        bool
+	OnOffDelay []int
+	Pattern    []int
+	Count      int
+	Repeat     bool
 }
 
-func timerTrigger(dir string, trigger string) error {
-	trigF := path.Join(dir, triggerFile)
-	onF := path.Join(dir, onDelayFile)
-	offF := path.Join(dir, offDelayFile)
+type trigger struct {
+	file    string
+	modes   []string
+	current int
+}
 
-	_, onFerr := os.Stat(onF)
-	_, offFerr := os.Stat(offF)
-	if onFerr != nil || offFerr != nil {
-		// delay_on / delay_off files not found ... Need trigger file to create them
-		_, err := os.Stat(trigF)
-		if err != nil {
-			return err
+type led struct {
+	dir            string
+	max            int
+	trigger        trigger
+	cmdInChan      chan Command
+	command        Command
+	cmdStartedChan chan struct{}
+	cmdQuitChan    chan struct{}
+}
+
+func New(dir string) (chan Command, error) {
+	// validate specified path
+	err := ensureDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	led := led{
+		dir:            dir,
+		cmdInChan:      make(chan Command),
+		cmdStartedChan: make(chan struct{}),
+		cmdQuitChan:    make(chan struct{}),
+	}
+	err = led.readTrigger()
+	if err != nil {
+		return nil, err
+	}
+
+	maxBrightness, err := readNumFromFile(path.Join(dir, maxLevelFile))
+	if err != nil {
+		led.max = 1
+	} else {
+		led.max = maxBrightness
+	}
+
+	go led.startReceiver()
+
+	return led.cmdInChan, nil
+}
+
+func (o *led) readTrigger() error {
+	// trigger file exists?
+	tf := path.Join(o.dir, triggerFile)
+	stat, err := os.Stat(tf)
+	if err != nil {
+		return err
+	}
+
+	// trigger file is file?
+	mode := stat.Mode()
+	if !mode.IsRegular() {
+		return fmt.Errorf("%s is not a regular file", tf)
+	}
+
+	// file looks good. save it.
+	o.trigger.file = tf
+
+	data, err := ioutil.ReadFile(tf)
+	if err != nil {
+		return err
+	}
+
+	// construct the trigger structure. Doing so requires finding the trigger value
+	// in square brackets, removing those brackets, and storing its index value.
+	modes := strings.Split(strings.TrimRight(string(data), "\n"), " ")
+	for i, mode := range modes {
+		if strings.HasPrefix(mode, "[") && strings.HasSuffix(mode, "]") {
+			mode = mode[1 : len(mode)-1]
+			o.trigger.current = i
 		}
-
-		// cause delay_on / delay_off files to be created
-		err = ioutil.WriteFile(trigF, []byte(trigger), 0000)
-		if err != nil {
-			return err
-		}
-
-		timer := time.NewTimer(5000 * time.Millisecond)
-		var timeout bool
-		go func() {
-			<-timer.C
-			timeout = true
-		}()
-
-		var on_found, off_found bool
-		for !on_found || !off_found || !timeout {
-			if !on_found {
-				_, err = os.Stat(onF)
-				if err != nil {
-					continue
-				} else {
-					on_found = true
-					continue
-				}
-			}
-
-			if !off_found {
-				_, err = os.Stat(offF)
-				if err != nil {
-					continue
-				} else {
-					off_found = true
-					continue
-				}
-			}
-
-			if on_found && off_found {
-				break
-			}
-
-			time.Sleep(10 * time.Millisecond)
-		}
-
-		if timeout {
-			return fmt.Errorf("found on: %t, found off: %t", on_found, off_found)
+		if len(mode) > 0 {
+			o.trigger.modes = append(o.trigger.modes, mode)
 		}
 	}
 
 	return nil
 }
 
-func onOff(dir string, on int, off int, done chan struct{}) {
-	err := timerTrigger(dir, "timer")
-	if err != nil {
-		log.Println(err)
-		<-done
-		return
+func (o *led) setTrigger(new string) error {
+	// validate input
+	var validTrigger bool
+	var newIndex int
+	for i, mode := range o.trigger.modes {
+		if new == mode {
+			validTrigger = true
+			newIndex = i
+			break
+		}
+	}
+	if !validTrigger {
+		return fmt.Errorf("invalid trigger %s - valid triggers are %s", new, strings.Join(o.trigger.modes, "/"))
 	}
 
-	err = ioutil.WriteFile(path.Join(dir, onDelayFile), []byte(strconv.Itoa(int(on))), 0000)
-	if err != nil {
-		log.Println(err)
-		<-done
-		return
+	// previously set?
+	if o.trigger.current == newIndex {
+		return nil
+	} else {
+		o.trigger.current = newIndex
+		err := ioutil.WriteFile(o.trigger.file, []byte(new), 0600)
+		if err != nil {
+			return err
+		}
 	}
-
-	err = ioutil.WriteFile(path.Join(dir, offDelayFile), []byte(strconv.Itoa(int(off))), 0000)
-	if err != nil {
-		log.Println(err)
-		<-done
-		return
-	}
-
-	<-done
+	return nil
 }
 
-func count(dir string, count int, done chan struct{}) {
-	localDone := make(chan struct{})
-
-	go percent(dir, 0, localDone)
-	time.Sleep(500 * time.Millisecond)
-
-	for i := count; i > 0; i-- {
-		go percent(dir, 100, localDone)
-		time.Sleep(250 * time.Millisecond)
-		go percent(dir, 0, localDone)
-		time.Sleep(500 * time.Millisecond)
-	}
-	done <- struct{}{}
-	<-done
+func (o led) getTrigger() string {
+	return o.trigger.modes[o.trigger.current]
 }
 
-func pattern(dir string, pattern []int, done chan struct{}) {
-	localDone := make(chan struct{})
-	time.Sleep(1*time.Second)
-	for _, i := range pattern {
-		go count(dir, i, localDone)
-		<- localDone
-		localDone <- struct{}{}
-		time.Sleep(1*time.Second)
+func (o *led) off() {
+	err := o.setBrightness(0)
+	if err != nil {
+		log.Println(err)
 	}
-	done <- struct{}{}
-	<-done
+	o.cmdStartedChan <- struct{}{}
+	<-o.cmdQuitChan
 }
 
-func percent(dir string, percent int, done chan struct{}) {
+func (o *led) on() {
+	err := o.setBrightness(o.max)
+	if err != nil {
+		log.Println(err)
+	}
+	o.cmdStartedChan <- struct{}{}
+	<-o.cmdQuitChan
+}
+
+func (o *led) delayOnOff() {
+	err := o.setDelayOnOff(o.command.OnOffDelay[0], o.command.OnOffDelay[1])
+	if err != nil {
+		log.Println(err)
+	}
+	o.cmdStartedChan <- struct{}{}
+	<-o.cmdQuitChan
+}
+
+func (o *led) percent() {
+	percent := o.command.Percent
+	maxVal := 499
 	if percent > 100 {
 		percent = 100
 	}
@@ -150,51 +187,161 @@ func percent(dir string, percent int, done chan struct{}) {
 		percent = 0
 	}
 
-	onOff(dir, percent, 100-percent, done)
-}
+	onVal := maxVal * percent / 100
+	offVal := maxVal * (100 - percent) / 100
 
-func NewCloudKeyLed(dir string) (chan LedSetting, error) {
-	// ensure specified LED path exists
-	stat, err := os.Stat(dir)
+	err := o.setDelayOnOff(onVal, offVal)
 	if err != nil {
-		return nil, err
+		log.Println(err)
 	}
-	if !stat.IsDir() {
-		return nil, fmt.Errorf("not a directory: %s", dir)
-	}
-
-	settingChan := make(chan LedSetting)
-	go cloudKeyLedReceiver(dir, settingChan)
-
-	return settingChan, nil
+	o.cmdStartedChan <- struct{}{}
+	<-o.cmdQuitChan
 }
 
-func dummy(doneChan chan struct{}) {
-	<-doneChan
-}
-
-func cloudKeyLedReceiver(dir string, in chan LedSetting) {
-	doneChan := make(chan struct{})
-	//go percent(dir, 0, doneChan)
-	go dummy(doneChan)
-
-	for instruction := range in {
-		doneChan <- struct{}{}
-		switch {
-		case instruction.Quit:
-			log.Println("quitting")
+func (o *led) count() {
+	err := o.flashXtimes(o.command.Count)
+	o.cmdStartedChan <- struct{}{}
+	if err != nil {
+		log.Println(err)
+		<-o.cmdQuitChan
+		return
+	}
+	for o.command.Repeat {
+		select {
+		case <-o.cmdQuitChan:
 			return
-		case instruction.OnOff != nil:
-			go onOff(dir, instruction.OnOff[0], instruction.OnOff[1], doneChan)
-		case instruction.Count > 0:
-			log.Println("count: ", instruction.Count)
-			go count(dir, instruction.Count, doneChan)
-			<-doneChan
-		case instruction.Pattern != nil:
-			go pattern(dir, instruction.Pattern, doneChan)
-			<-doneChan
 		default:
-			go percent(dir, instruction.Percent, doneChan)
+			err := o.flashXtimes(o.command.Count)
+			if err != nil {
+				log.Println(err)
+				<-o.cmdQuitChan
+				return
+			}
+
 		}
 	}
+	<-o.cmdQuitChan
+}
+
+func (o *led) pattern() {
+	err := o.flashPattern(o.command.Pattern)
+	o.cmdStartedChan <- struct{}{}
+	if err != nil {
+		log.Println(err)
+		<-o.cmdQuitChan
+		return
+	}
+	for o.command.Repeat {
+		select {
+		case <-o.cmdQuitChan:
+			return
+		default:
+			err := o.flashPattern(o.command.Pattern)
+			if err != nil {
+				log.Println(err)
+				<-o.cmdQuitChan
+				return
+			}
+		}
+	}
+	<-o.cmdQuitChan
+}
+
+func (o *led) startReceiver() {
+	// start dummy "previous command" to indicate the loop can proceed
+	go func() { <-o.cmdQuitChan }()
+
+	// loop over incoming commands.
+CMDLOOP:
+	for cmd := range o.cmdInChan {
+		// stop the previous command
+		o.cmdQuitChan <- struct{}{}
+		o.command = cmd
+		switch {
+		case cmd.Quit:
+			break CMDLOOP
+		case cmd.Off:
+			go o.off()
+			<-o.cmdStartedChan
+		case cmd.On:
+			go o.on()
+			<-o.cmdStartedChan
+		case len(cmd.OnOffDelay) == 2:
+			go o.delayOnOff()
+			<-o.cmdStartedChan
+		case cmd.Count > 0:
+			go o.count()
+			<-o.cmdStartedChan
+		case len(cmd.Pattern) > 0:
+			go o.pattern()
+			<-o.cmdStartedChan
+		default:
+			go o.percent()
+			<-o.cmdStartedChan
+		}
+	}
+}
+
+func (o *led) setDelayOnOff(on int, off int) error {
+	err := o.setTrigger(triggerTimer)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(path.Join(o.dir, onDelayFile), []byte(strconv.Itoa(on)), 0000)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(path.Join(o.dir, offDelayFile), []byte(strconv.Itoa(off)), 0000)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (o *led) setBrightness(b int) error {
+	err := o.setTrigger(triggerNone)
+	if err != nil {
+		return err
+	}
+
+	bf := path.Join(o.dir, brightnessFile)
+	bs := strconv.Itoa(b) + "\n"
+	return ioutil.WriteFile(bf, []byte(bs), 0600)
+}
+
+func (o *led) flashXtimes(times int) error {
+	err := o.setBrightness(0)
+	if err != nil {
+		return err
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	for i := 0; i < times; i++ {
+		err := o.setBrightness(o.max)
+		if err != nil {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+		err = o.setBrightness(0)
+		if err != nil {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
+}
+
+func (o *led) flashPattern(pattern []int) error {
+	time.Sleep(time.Second)
+	for _, i := range pattern {
+		err := o.flashXtimes(i)
+		if err != nil {
+			return err
+		}
+		time.Sleep(time.Second)
+	}
+	return nil
 }
